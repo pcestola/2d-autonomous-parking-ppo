@@ -3,10 +3,9 @@
 Progetto completo per un **ambiente di parcheggio** con:
 - **Demo 3D WASD** (scena pronta `Main.tscn` con `Car3D`).
 - **PPO headless** già impostato (MLP + GAE + clipping), con loop di training e valutazione.
-- Nessun bridge Python (focalizzato su performance in-engine).
 
 ## Requisiti
-- **Godot 4.4.1** (Forward+).
+- **Godot 4.4.1**.
 - Nessuna dipendenza esterna.
 
 ## Struttura
@@ -32,9 +31,6 @@ godot-ppo-parking/
 │ ├─ mlp.gd
 │ ├─ ppo.gd
 │ └─ trainer_demo.gd
-
-markdown
-Copia codice
 
 ## Demo 3D (WASD)
 1. Apri il progetto in **Godot 4.4.1**.
