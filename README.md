@@ -9,7 +9,8 @@ Progetto completo per un **ambiente di parcheggio** con:
 - Nessuna dipendenza esterna.
 
 ## Struttura
-godot-ppo-parking/
+```
+ParkingPPO/
 ├─ project.godot
 ├─ .gitignore
 ├─ LICENSE
@@ -17,20 +18,21 @@ godot-ppo-parking/
 ├─ scenes/
 │ ├─ Main.tscn
 │ └─ Car3D.tscn
-├─ scripts/
-│ ├─ utils/
-│ │ └─ logger.gd
-│ ├─ physics/
-│ │ ├─ car_physics.gd
-│ │ ├─ simple_ackermann_physics.gd
-│ │ └─ bicycle_model_physics.gd
-│ ├─ car/
-│ │ ├─ car3d.gd
-│ │ └─ car_virtual.gd
-│ └─ rl/
-│ ├─ mlp.gd
-│ ├─ ppo.gd
-│ └─ trainer_demo.gd
+└─ scripts/
+  ├─ utils/
+  │ └─ logger.gd
+  ├─ physics/
+  │ ├─ car_physics.gd
+  │ ├─ simple_ackermann_physics.gd
+  │ └─ bicycle_model_physics.gd
+  ├─ car/
+  │ ├─ car3d.gd
+  │ └─ car_virtual.gd
+  └─ rl/
+    ├─ mlp.gd
+    ├─ ppo.gd
+    └─ trainer_demo.gd
+```
 
 ## Demo 3D (WASD)
 1. Apri il progetto in **Godot 4.4.1**.
