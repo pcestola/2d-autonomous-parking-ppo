@@ -1,0 +1,12 @@
+[gd_scene load_steps=2 format=3 uid="uid://bl3cyy31t78iv"]
+
+[ext_resource type="PackedScene" path="res://scenes/Car3D.tscn" id="1"]
+
+[node name="Main" type="Node3D"]
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.819152, 0.573576, 0, -0.573576, 0.819152, 0, 10, 12)
+
+[node name="Car" parent="." instance=ExtResource("1")]

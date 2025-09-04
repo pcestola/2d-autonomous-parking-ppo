@@ -1,0 +1,11 @@
+# Godot-specific
+.import/
+.godot/
+# Builds/exports
+export/
+# OS cruft
+.DS_Store
+Thumbs.db
+# Python
+__pycache__/
+*.pyc
