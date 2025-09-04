@@ -38,10 +38,8 @@ ParkingPPO/
 1. Apri il progetto in **Godot 4.4.1**.
 2. Apri `scenes/Main.tscn` e premi **Play**.
    - W/S avanti/indietro, A/D sterzo (A=sinistra, D=destra), R reset.
-   - L'auto parte verso **-Z** (va via dalla camera con W).
 
 ## Training PPO (headless)
-Terminale → nella cartella del progetto:
 godot4 --headless --path . --script res://scripts/rl/trainer_demo.gd
 
 ### Parametri default (in `trainer_demo.gd`)
