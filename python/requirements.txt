@@ -1,0 +1,5 @@
+numpy>=1.26
+gymnasium>=0.29
+stable-baselines3>=2.3.2
+torch>=2.2 ; platform_system!="Darwin" or platform_machine!="arm64"
+tqdm>=4.66

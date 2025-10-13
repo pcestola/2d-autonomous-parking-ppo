@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.replays/*
+replays/*
+models/
+.venv/
+.old/

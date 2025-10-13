@@ -1,11 +1,9 @@
-# Godot-specific
-.import/
-.godot/
-# Builds/exports
-export/
-# OS cruft
-.DS_Store
-Thumbs.db
+# Godot
+godot/.import/
+godot/.godot/
 # Python
-__pycache__/
-*.pyc
+python/.venv
+python/.old
+python/models/*
+python/*__pycache__
+python/*.pyc
