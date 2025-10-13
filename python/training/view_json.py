@@ -95,7 +95,7 @@ def main(path: str | None, interval_ms: int, tail_len: int, speed: float, index:
               edge=(0.9, 0.0, 0.0), face=None, lw=2.0, z=0.20)  # end
 
     # traiettoria - livello più alto
-    (traj_line,) = ax.plot([], [], '-r', linewidth=2.2, zorder=0.90)
+    (traj_line,) = ax.plot([], [], '-k', linewidth=2.2, zorder=0.90)
 
     # auto in movimento come immagine — dimensioni via extent (senza scale nel transform)
     car_img_path = os.path.join("lib", "cars", "car.png")
@@ -156,8 +156,11 @@ def main(path: str | None, interval_ms: int, tail_len: int, speed: float, index:
         blit=False, repeat=True
     )
 
-    # anim.save('ok.gif', fps=30)
-    plt.show()
+    if args.gif:
+        # TODO: aggiungi cambio del nome automatico
+        anim.save('./images/esempio.gif', fps=30)
+    else:
+        plt.show()
 
 
 # ---------- entry ----------
@@ -173,5 +176,6 @@ if __name__ == "__main__":
                         help="Lunghezza coda traiettoria (frame). 0 = intera traccia.")
     parser.add_argument("--speed", type=float, default=1.0,
                         help="Velocità: >1 salta frame (riproduzione più rapida).")
+    parser.add_argument('--gif', action='store_true')
     args = parser.parse_args()
     main(args.file, args.interval, args.tail, args.speed, args.index)
