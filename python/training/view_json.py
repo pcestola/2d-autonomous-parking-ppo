@@ -3,8 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from matplotlib.animation import FuncAnimation
+from matplotlib.transforms import Affine2D
 from lib.geometry import rect_corners, CAR_LEN, CAR_WID
 
+# TODO: aggiungi la hitbox dell'auto
 
 # ---------- util ----------
 def draw_rect(ax, cx, cy, L, W, th, edge=None, face=None, alpha=1.0, lw=1.5, z=0.0):
@@ -47,6 +49,11 @@ def find_nth_latest(replays_dir="replays", index: int = 0):
     return files[index]
 
 
+# ---------- const ----------
+# Se la PNG "punta" verso +Y, lascia +90°. Se punta già verso +X, metti 0.0
+HEADING_OFFSET = np.deg2rad(90)
+
+
 # ---------- main ----------
 def main(path: str | None, interval_ms: int, tail_len: int, speed: float, index: int):
     if path is None:
@@ -87,12 +94,35 @@ def main(path: str | None, interval_ms: int, tail_len: int, speed: float, index:
     draw_rect(ax, poses[-1, 0], poses[-1, 1], CAR_LEN, CAR_WID, poses[-1, 2],
               edge=(0.9, 0.0, 0.0), face=None, lw=2.0, z=0.20)  # end
 
-    # oggetti dinamici: AUTO (medio) e TRAIETTORIA (sopra)
-    # auto in movimento (colore diverso) - livello intermedio
-    car_poly = draw_rect(ax, poses[0, 0], poses[0, 1], CAR_LEN, CAR_WID, poses[0, 2],
-                         edge=(0.9, 0.45, 0.0), face=(1.0, 0.7, 0.2), alpha=0.95, lw=2.0, z=0.60)
     # traiettoria - livello più alto
     (traj_line,) = ax.plot([], [], '-r', linewidth=2.2, zorder=0.90)
+
+    # auto in movimento come immagine — dimensioni via extent (senza scale nel transform)
+    car_img_path = os.path.join("lib", "cars", "car.png")
+    car_tex = plt.imread(car_img_path)
+
+    # Mappa automaticamente il lato lungo dell'immagine a CAR_LEN e il lato corto a CAR_WID
+    h, w = car_tex.shape[0], car_tex.shape[1]
+    if h >= w:
+        # PNG più alta che larga: il lato lungo dell'immagine (asse Y) diventa la lunghezza dell'auto
+        car_extent = [-CAR_WID/2, CAR_WID/2, -CAR_LEN/2, CAR_LEN/2]
+    else:
+        # PNG più larga che alta: il lato lungo dell'immagine (asse X) diventa la lunghezza dell'auto
+        car_extent = [-CAR_LEN/2, CAR_LEN/2, -CAR_WID/2, CAR_WID/2]
+
+    car_artist = ax.imshow(
+        car_tex,
+        origin="lower",
+        interpolation="bilinear",
+        zorder=0.60,
+        alpha=0.95,
+        extent=car_extent,
+    )
+
+    # trasformazione iniziale: RUOTA (attorno al centro) -> TRASLA
+    x0, y0, th0 = poses[0, 0], poses[0, 1], poses[0, 2]
+    init_trans = Affine2D().rotate_around(0.0, 0.0, th0 + HEADING_OFFSET).translate(x0, y0) + ax.transData
+    car_artist.set_transform(init_trans)
 
     autolimits(ax, data)
     ax.grid(True, alpha=0.25, zorder=0.01)
@@ -108,23 +138,25 @@ def main(path: str | None, interval_ms: int, tail_len: int, speed: float, index:
         # aggiorna traiettoria (sopra)
         traj_line.set_data(poses[j0:i + 1, 0], poses[j0:i + 1, 1])
 
-        # aggiorna macchina (mezzo)
-        pts = rect_corners(poses[i, 0], poses[i, 1], CAR_LEN, CAR_WID, poses[i, 2])
-        car_poly.set_xy(pts)
+        # aggiorna immagine dell'auto: RUOTA (attorno al centro) -> TRASLA
+        x, y, th = poses[i, 0], poses[i, 1], poses[i, 2]
+        car_artist.set_transform(
+            Affine2D().rotate_around(0.0, 0.0, th + HEADING_OFFSET).translate(x, y) + ax.transData
+        )
 
         # titolo con reward
         ax.set_title(f"Reward: {rewards[i]:+.3f}    Totale: {cum_rewards[i]:.3f}",
                      fontsize=13, color="darkred", pad=15)
 
-        return traj_line, car_poly
+        return traj_line, car_artist
 
     frames = int(np.ceil(total / step))
     anim = FuncAnimation(
         fig, update, frames=frames, interval=interval_ms,
-        blit=False, repeat=False
+        blit=False, repeat=True
     )
 
-    #anim.save('ok.gif', fps=30)
+    # anim.save('ok.gif', fps=30)
     plt.show()
 
 
