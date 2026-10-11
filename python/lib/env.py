@@ -12,14 +12,22 @@ from .replay import ReplayLogger
 
 class Parking2DEnv(gym.Env):
     """
-    Variante 'global-only' per l'osservazione:
-      obs = [cos dth, sin dth, dx_n, dy_n, tanh(v), steer_norm, rays_norm...]
+    Ambiente 2D per parcheggio in stile autoveicolo.
 
-    Fix inclusi:
-      - Successo NON può avvenire nello stesso step di collisione o OOB.
-      - inside_slot 'tight': considera le dimensioni dell'auto rispetto a quelle dello slot.
-      - Ricompensa terminale di successo applicata solo se success=True dopo le precedenze.
-      - Guardrail su NaN nello stato (terminazione sicura).
+    L'osservazione include:
+      - errore di heading nel frame del posto
+      - offset locale rispetto al centro slot
+      - distanza al centro slot
+      - velocità
+      - sterzo
+      - raycast ambientali
+
+    La reward è progettata per essere semplice e interpretabile:
+      - progress toward slot
+      - heading alignment
+      - lateral alignment
+      - forte penalty collision / OOB / timeout
+      - bonus forte al successo
     """
     metadata = {"render_modes": []}
 
@@ -37,7 +45,7 @@ class Parking2DEnv(gym.Env):
         stall_speed: float = 0.05,
         stall_time_s: float = 3.0,
         ray_max_range: float = 15.0,
-        global_norm_scale: float = 20.0,  # scala per normalizzare dx, dy globali
+        global_norm_scale: float = 12.0,
     ):
         super().__init__()
         self.layout = layout
@@ -46,26 +54,19 @@ class Parking2DEnv(gym.Env):
         self.dt = 0.1
         self.L = 2.64
 
-        # limiti cinematica
         self.v_max_f, self.v_max_b = 3.0, -1.5
         self.steer_max, self.steer_rate = 0.6, 1.5
         self.drag = 0.35
 
-        # sensori
         self.ray_max_range = float(ray_max_range)
-
-        # normalizzazione globale dx, dy
         self.global_norm_scale = float(global_norm_scale)
 
-        # successo / termination
         self.success_angle = float(np.deg2rad(success_angle_deg))
         self.success_speed_max = float(success_speed_max)
         self.stall_speed = float(stall_speed)
         self.stall_steps = int(max(1, stall_time_s / self.dt))
 
-        # osservazione: 6 core + rays
-        # [cos dth, sin dth, dx_n, dy_n, tanh(v), steer_norm]
-        self.obs_core_size = 6
+        self.obs_core_size = 8
         self.obs_size = self.obs_core_size + self.rays
 
         self.action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
@@ -75,21 +76,22 @@ class Parking2DEnv(gym.Env):
         self.save_every = int(max(1, save_every))
         self.frame_stride = int(max(1, frame_stride))
 
-        # stati interni
         self._steer = 0.0
         self._prev_steer = 0.0
         self._ep_idx = 0
         self._save_this_ep = False
         self._prev_phi = 0.0
-        self.prev_d = 0.0
         self.dwell = 0
         self._stall_count = 0
 
-    # --------- Gym API ----------
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.sit: ParkingSituation = gen_situation(layout=self.layout, seed=seed)
-        self.state = np.array([*self.sit.car_start_pose, 0.0], dtype=float)  # x,y,th,v
+
+        rng = np.random.default_rng(seed if seed is not None else np.random.randint(0, 2**31 - 1))
+        difficulty = float(rng.uniform(0.15, 0.9))
+        self.sit: ParkingSituation = gen_situation(layout=self.layout, seed=int(rng.integers(1, 2**31 - 1)), difficulty=difficulty)
+
+        self.state = np.array([*self.sit.car_start_pose, 0.0], dtype=float)
         self.t = 0
         self.dwell = 0
         self._stall_count = 0
@@ -97,10 +99,8 @@ class Parking2DEnv(gym.Env):
         self._steer = 0.0
         self._build_grid()
 
-        self.prev_d = np.linalg.norm(self.state[:2] - self.sit.spot_pose[:2])
         self._prev_phi = self._compute_potential()
 
-        # decide se salvare questo episodio
         self._ep_idx += 1
         self._save_this_ep = (self.logger is not None) and (self._ep_idx % self.save_every == 0)
         if self._save_this_ep:
@@ -110,79 +110,68 @@ class Parking2DEnv(gym.Env):
         return self._obs(), {}
 
     def step(self, action):
-        # guardrail: evita NaN in input
         if not np.all(np.isfinite(action)):
             action = np.nan_to_num(action, nan=0.0, posinf=1.0, neginf=-1.0)
 
         steer_cmd = float(np.clip(action[0], -1, 1))
-        acc_cmd   = float(np.clip(action[1], -1, 1))
+        acc_cmd = float(np.clip(action[1], -1, 1))
 
         x, y, th, v = self.state
         x, y, th, v, self._steer = self._bicycle_step(x, y, th, v, self._steer, acc_cmd, steer_cmd)
         self.state = np.array([x, y, th, v], dtype=float)
         self.t += 1
 
-        # guardrail: NaN nello stato → termina
         if not np.all(np.isfinite(self.state)):
-            infos = {"success": False, "collided": False, "stalled": False, "nan_state": True}
+            infos = {"success": False, "collided": False, "stalled": False, "nan_state": True, "oob": True}
             return self._obs(), -10.0, True, False, infos
 
-        # dwell con cap
         if self._inside_slot_tight() and abs(self.state[3]) < 0.15:
-            self.dwell = min(self.dwell + 1, int(3.0 / self.dt))  # max ~3s
+            self.dwell = min(self.dwell + 1, int(3.0 / self.dt))
         else:
             self.dwell = 0
 
-        # stall detection
         if (abs(self.state[3]) < self.stall_speed) and (not self._inside_slot_tight()):
             self._stall_count += 1
         else:
             self._stall_count = 0
 
-        # EVENTI
         collided = collide_car(x, y, th, self.sit.obstacles)
-        oob      = self._outside_bounds()
-
-        # successo "raw"
+        oob = self._outside_bounds()
         success_raw = self._success_tight()
-
-        # PRECEDENZA: collisione / OOB vincono SEMPRE sul successo
         success = bool(success_raw and (not collided) and (not oob))
 
-        timeout  = (self.t >= self.max_steps)
-        stalled  = (self._stall_count >= self.stall_steps)
-
+        timeout = (self.t >= self.max_steps)
+        stalled = (self._stall_count >= self.stall_steps)
         done = collided or success or timeout or oob or stalled
-        rew  = self._reward(collided, success, stalled) + (-0.5 if oob else 0.0)
+        rew = self._reward(collided, success, stalled, oob)
 
         if self._save_this_ep:
             if (self.t % self.frame_stride) == 0:
-                self.logger.push(self.state[:3], rew) # NOTE: modificato per aggiungere rew
+                self.logger.push(self.state[:3], rew)
             if done:
                 if (self.t % self.frame_stride) != 0:
-                    self.logger.push(self.state[:3], rew) # NOTE: modificato per aggiungere rew
+                    self.logger.push(self.state[:3], rew)
                 fname = f"{self.sit.layout}_seed{self.sit.seed}_t{self.t}_succ{int(success)}.json"
                 self.logger.dump(self.sit, fname)
 
         infos = {"success": success, "collided": bool(collided), "stalled": bool(stalled), "oob": bool(oob)}
         return self._obs(), float(rew), bool(done), False, infos
 
-    # --------- Dynamics / Sensors ----------
     def _bicycle_step(self, x, y, th, v, steer, a_cmd, turn_cmd):
         dt = self.dt
-        L  = self.L
+        L = self.L
 
         self._prev_steer = steer
         steer += np.clip(turn_cmd, -1, 1) * self.steer_rate * dt
-        steer  = float(np.clip(steer, -self.steer_max, self.steer_max))
+        steer = float(np.clip(steer, -self.steer_max, self.steer_max))
 
-        a = float(a_cmd) * 1.2  # più mansueta per manovre
+        a = float(a_cmd) * 1.2
         v = v + (a - self.drag * v) * dt
         v = float(np.clip(v, self.v_max_b, self.v_max_f))
 
         th = (th + (v / L) * np.tan(steer) * dt + np.pi) % (2 * np.pi) - np.pi
-        x  = x + v * np.cos(th) * dt
-        y  = y + v * np.sin(th) * dt
+        x = x + v * np.cos(th) * dt
+        y = y + v * np.sin(th) * dt
         return x, y, th, v, steer
 
     def _build_grid(self):
@@ -199,9 +188,7 @@ class Parking2DEnv(gym.Env):
         car = (self.state[0], self.state[1], CAR_LEN, CAR_WID, self.state[2])
         return not rect_inside_bounds(car, self.world_rect_big)
 
-    # --------- Geometria / Utility ----------
     def _relative_pose(self):
-        """(lx, ly, d, dth) nel frame del posto (non esposte all'agente)."""
         x, y, th, _ = self.state
         sx, sy, sth = self.sit.spot_pose
         c, s = np.cos(-sth), np.sin(-sth)
@@ -212,38 +199,29 @@ class Parking2DEnv(gym.Env):
         return lx, ly, d, dth
 
     def _global_delta(self):
-        """Delta GLOBALE verso il centro del posto (dx, dy) in metri."""
         gx, gy, _ = self.sit.spot_pose
         dx = gx - self.state[0]
         dy = gy - self.state[1]
         return dx, dy
 
     def _slot_dims(self):
-        """
-        Stima le dimensioni dello slot (L,W) dai veicoli adiacenti; fallback a (5.0, 2.4).
-        """
         if self.sit.obstacles is not None and len(self.sit.obstacles) > 0:
-            # ostacoli: [x, y, len, wid, theta]
             L = float(self.sit.obstacles[0][2])
             W = float(self.sit.obstacles[0][3])
             return L, W
-        return 5.0, 2.4  # fallback
+        return 5.0, 2.4
 
-    # --------- Osservazioni ----------
     def _obs(self):
-        # orientamento relativo
-        _, _, _, dth = self._relative_pose()
+        lx, ly, d, dth = self._relative_pose()
+        slot_L, slot_W = self._slot_dims()
+
         cos_dth, sin_dth = np.cos(dth), np.sin(dth)
+        dx_local = float(np.clip(lx / (slot_L * 0.5 + 1e-6), -1.0, 1.0))
+        dy_local = float(np.clip(ly / (slot_W * 0.5 + 1e-6), -1.0, 1.0))
+        dist_norm = float(np.clip(d / 15.0, 0.0, 1.0))
+        v_norm = float(np.tanh(self.state[3] / 2.0))
+        steer_norm = float(self._steer / self.steer_max)
 
-        # delta GLOBALE (dx, dy) → normalizza in [-1,1]
-        dx, dy = self._global_delta()
-        s = self.global_norm_scale
-        #dx_n = np.clip(dx / s, -1.0, 1.0)
-        #dy_n = np.clip(dy / s, -1.0, 1.0)
-        dx_n = dx / s
-        dy_n = dy / s
-
-        # raggi → normalizza a [-1,1]
         th = self.state[2]
         angles = th + np.linspace(-0.9 * np.pi, 0.9 * np.pi, self.rays)
         rays = raycast_grid(self.grid, self.state[:2], angles, self.world_meta, max_range=self.ray_max_range)
@@ -251,20 +229,21 @@ class Parking2DEnv(gym.Env):
         rays_n01 = np.clip(rays / self.ray_max_range, 0.0, 1.0)
         rays_nm1p1 = rays_n01 * 2.0 - 1.0
 
-        # stato dinamico
-        v_n = np.tanh(self.state[3])
-        steer_norm = self._steer / self.steer_max
+        core = np.array([
+            cos_dth,
+            sin_dth,
+            dx_local,
+            dy_local,
+            dist_norm,
+            v_norm,
+            steer_norm,
+            float(np.clip(1.0 - dist_norm, 0.0, 1.0)),
+        ], dtype=np.float32)
 
-        core = np.array([cos_dth, sin_dth, dx_n, dy_n, v_n, steer_norm], dtype=np.float32)
         obs = np.concatenate([core, rays_nm1p1.astype(np.float32)], axis=0)
         return obs
 
-    # --------- Slot / Success / Reward ----------
     def _inside_slot_tight(self, safety_tol=(0.05, 0.05)):
-        """
-        TRUE se l'INTERO rettangolo dell'auto può stare nello slot:
-        |lx| <= (L_slot/2 - L_car/2 - tol_x) e |ly| <= (W_slot/2 - W_car/2 - tol_y)
-        """
         lx, ly, _, _ = self._relative_pose()
         Ls, Ws = self._slot_dims()
         tolx, toly = safety_tol
@@ -275,67 +254,66 @@ class Parking2DEnv(gym.Env):
         return (abs(lx) <= halfL_allow) and (abs(ly) <= halfW_allow)
 
     def _success_tight(self):
-        """
-        Successo se: dentro slot 'tight', allineato e praticamente fermo.
-        """
         x, y, th, v = self.state
         sx, sy, sth = self.sit.spot_pose
         dth = (sth - th + np.pi) % (2 * np.pi) - np.pi
         return self._inside_slot_tight() and (abs(dth) < self.success_angle) and (abs(v) < self.success_speed_max)
 
     def _compute_potential(self):
-        """Potenziale φ = distanza + yaw error + offset laterale (tutti normalizzati)."""
         lx, ly, d, dth = self._relative_pose()
-        d_term = (d / 15.0)
-        yaw_term = (abs(dth) / np.pi)
-        ly_term = (abs(ly) / 3.0)
-        return 1.0 * d_term + 0.5 * yaw_term + 0.7 * ly_term
+        slot_L, slot_W = self._slot_dims()
+        dist_term = d / max(slot_L, 5.0)
+        yaw_term = abs(dth) / np.pi
+        lateral_term = abs(ly) / max(slot_W * 0.5, 1.0)
+        return 0.5 * dist_term + 0.6 * yaw_term + 0.7 * lateral_term
 
-    def _reward(self, collided, success, stalled):
-        # progresso potential-based
+    def _reward(self, collided, success, stalled, oob):
+        lx, ly, d, dth = self._relative_pose()
+        slot_L, slot_W = self._slot_dims()
         phi = self._compute_potential()
         dphi = self._prev_phi - phi
         self._prev_phi = phi
 
-        r = 0.2 * dphi
-        r += -0.002  # piccolo costo temporale
+        r = 0.7 * dphi
+        r -= 0.01
 
-        # termini di controllo (interni)
-        lx, ly, d, dth = self._relative_pose()
-        th = self.state[2]
-        sth = self.sit.spot_pose[2]
-        v = self.state[3]
+        dist_term = np.clip(d / max(slot_L, 5.0), 0.0, 1.0)
+        yaw_term = abs(dth) / np.pi
+        lateral_term = abs(ly) / max(slot_W * 0.5, 1.0)
 
-        v_long = v * np.cos(th - sth)
-        v_ref = np.clip(0.5 * d, 0.0, 2.0) * np.sign(-lx)
+        r += 0.25 * (1.0 - dist_term)
+        r -= 0.25 * yaw_term
+        r -= 0.35 * np.clip(lateral_term, 0.0, 1.0)
 
-        if not self._inside_slot_tight():
-            r += 0.3 * (1 - np.clip(d / 15.0, 0.0, 1.0))
-            r += -0.05 * abs(dth)
-            r += -0.05 * abs(v_long - v_ref)
-            # lieve termine globale: più vicino al posto è meglio anche da lontano
-            dx, dy = self._global_delta()
-            r += -0.001 * np.hypot(dx, dy)
+        if self._inside_slot_tight():
+            r += 0.8 * (1.0 - np.clip(d / 3.0, 0.0, 1.0))
+            r -= 0.15 * abs(self.state[3])
+            r += 0.03 * self.dwell
         else:
-            r += 0.6 * (1 - np.clip(d / 15.0, 0.0, 1.0))
-            r += -0.3 * abs(dth)
-            r += -0.4 * abs(v)
-            r += 0.02 * self.dwell  # max ~0.6
+            r -= 0.05 * abs(self.state[3])
 
-        # smoothness sterzo
-        r += -0.01 * abs(self._steer)
-        r += -0.02 * abs(self._steer - self._prev_steer)
+        r -= 0.02 * abs(self._steer)
+        r -= 0.02 * abs(self._steer - self._prev_steer)
 
-        # terminali (success già ha precedenza applicata)
         if collided:
-            r -= 5.0
+            r -= 10.0
         if success:
-            r += 20.0
+            r += 30.0
         if stalled:
-            r -= 1.0
-
-        # compat
-        sx, sy, _ = self.sit.spot_pose
-        self.prev_d = np.linalg.norm([self.state[0] - sx, self.state[1] - sy])
+            r -= 3.0
+        if oob:
+            r -= 8.0
 
         return float(r)
+
+
+""" NOTE
+La reward qui sotto è intenzionalmente semplice e stabile.
+L'obiettivo non è premiare ogni dettaglio secondario, bensì far
+crescere una politica capace di:
+  1. avvicinarsi al posto,
+  2. allinearsi correttamente,
+  3. entrare senza collisioni.
+"""
+
+
